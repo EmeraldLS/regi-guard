@@ -1,0 +1,41 @@
+version: '3.1'
+
+services:
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    restart: always
+    ports:
+      - '3000:3000'
+    volumes:
+      - ./grafana-storage:/var/lib/grafana
+
+  main:
+    build: 
+      context: ./
+      dockerfile: Dockerfile
+    container_name: main
+    restart: always
+    ports:
+      - '2222:2222'
+    volumes:
+      - ./extras/standard.flf:/app/extras/standard.flf
+
+
+    
+  prometheus:
+    image: prom/prometheus
+    container_name: prometheus
+    restart: always
+    ports:
+      - '9090:9090'
+    volumes:
+      - ./prometheus/:/etc/prometheus/
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+volumes:
+  prometheus_data:

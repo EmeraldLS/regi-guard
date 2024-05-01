@@ -5,19 +5,79 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"math/rand"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/actor-staged-form/commands"
-	"github.com/actor-staged-form/utils"
 	"github.com/anthdm/hollywood/actor"
 	"github.com/golang-module/carbon"
+	"github.com/gorilla/mux"
 	"github.com/gorilla/websocket"
 	"github.com/oklog/ulid/v2"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 const MAX_STAGES = 2
+
+type responseWriter struct {
+	http.ResponseWriter
+	http.Hijacker
+	StatusCode int
+}
+
+func NewResponseWriter(w http.ResponseWriter, h http.Hijacker) *responseWriter {
+	return &responseWriter{w, h, http.StatusOK}
+}
+
+func (rw *responseWriter) WriteHeader(statusCode int) {
+	rw.StatusCode = statusCode
+	rw.ResponseWriter.WriteHeader(statusCode)
+}
+
+var totalReqs = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Name: "http_request_total",
+	Help: "Total number of HTTP requests",
+}, []string{"path"})
+
+var responseStatus = prometheus.NewCounterVec(prometheus.CounterOpts{
+	Name: "response_status",
+	Help: "Status of response",
+}, []string{"status", "path"})
+
+var httpDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+	Name: "http_response_time_seconds",
+	Help: "Response time of HTTP requests.",
+}, []string{"path"})
+
+func prometheusMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			route := mux.CurrentRoute(r)
+			path, _ := route.GetPathTemplate()
+			timer := prometheus.NewTimer(httpDuration.WithLabelValues(path))
+
+			rw := NewResponseWriter(w, w.(http.Hijacker))
+			next.ServeHTTP(rw, r)
+
+			statusCode := rw.StatusCode
+
+			responseStatus.WithLabelValues(strconv.Itoa(statusCode), path).Inc()
+			totalReqs.WithLabelValues(path).Inc()
+
+			timer.ObserveDuration()
+		},
+	)
+}
+
+func init() {
+	prometheus.Register(totalReqs)
+	prometheus.Register(responseStatus)
+	prometheus.Register(httpDuration)
+}
 
 func GenerateId() string {
 	// Create a new ULID
@@ -46,20 +106,29 @@ func (s *TestServer) Receive(ctx *actor.Context) {
 	case actor.Started:
 		_ = msg
 		s.ctx = ctx
-		s.start(":3030")
+		s.start(":2222")
 	}
 }
 
 func (s *TestServer) start(port string) {
-	utils.GeneratedAscii("APEX SERVER")
+
 	go func() {
-		http.HandleFunc("/on", s.ConnectionHandler)
-		http.ListenAndServe(port, nil)
+		r := mux.NewRouter()
+		r.Use(prometheusMiddleware)
+
+		r.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+			w.Write([]byte("This is the homepage"))
+		})
+
+		r.HandleFunc("/on", s.ConnectionHandler)
+		r.Handle("/metrics", promhttp.Handler())
+
+		log.Println("APPLICATION STARTED AT PORT=", port)
+		log.Fatal(http.ListenAndServe(port, r))
 	}()
 }
 
 func (s *TestServer) ConnectionHandler(w http.ResponseWriter, r *http.Request) {
-
 	if len(s.stages) == MAX_STAGES {
 		w.Header().Set("FAILURE", "Stage cannot be created at this time")
 		http.Error(w, "stage cannot be created at this time", 500)
